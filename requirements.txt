@@ -1,0 +1,10 @@
+# Libraries for the Docker image, pinned to the versions the pipeline scripts were tested with.
+# torch and torchaudio are not here: the Dockerfile installs their CPU-only builds first.
+boto3==1.43.123
+numpy==2.5.3
+redis==8.1.0
+requests==2.34.2
+scikit-learn==1.9.1
+scipy==1.18.1
+soundfile==0.14.0
+speechbrain==1.1.1

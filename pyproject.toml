@@ -11,6 +11,10 @@ authors = [
 description = "Background service for WeBuddhist Studio tools: turns teaching recordings into course drafts (audio cleaning, speaker detection, Monlam transcription, S3 storage)."
 readme = "README.md"
 requires-python = ">=3.8"
+# Only what the code imports so far; the full pinned list for the image is in requirements.txt.
+dependencies = [
+    "redis>=5",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
