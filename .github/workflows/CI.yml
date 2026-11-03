@@ -32,4 +32,4 @@ jobs:
       run: PYTHONPATH=src pytest
     
     - name: Test Coverage
-      run: PYTHONPATH=src pytest --cov project_name
+      run: PYTHONPATH=src pytest --cov studio_tool_service

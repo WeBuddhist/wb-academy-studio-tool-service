@@ -3,12 +3,12 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "project_name"
+name = "wb-academy-studio-tool-service"
 version = "0.0.1"
 authors = [
   { name="OpenPecha", email="dev@openpecha.org" },
 ]
-description = "A small example package"
+description = "Background service for WeBuddhist Studio tools: turns teaching recordings into course drafts (audio cleaning, speaker detection, Monlam transcription, S3 storage)."
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
@@ -26,5 +26,5 @@ dev = [
 
 
 [project.urls]
-"Homepage" = "https://github.com/OpenPecha/openpecha-project-template"
-"Bug Tracker" = "https://github.com/OpenPecha/openpecha-project-template/issues"
+"Homepage" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service-"
+"Bug Tracker" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service-/issues"
