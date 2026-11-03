@@ -30,5 +30,5 @@ dev = [
 
 
 [project.urls]
-"Homepage" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service-"
-"Bug Tracker" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service-/issues"
+"Homepage" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service"
+"Bug Tracker" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service/issues"

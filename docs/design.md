@@ -96,19 +96,27 @@ can leave and come back.
 
 ## Plugin API
 
-Mounted on the Studio host like the AI course creator (`/api/ai-course-creator/...`).
-Auth: JWT or session, plus the existing `user_can_author` check.
+The `course_from_recording` app in `sherab-custom-plugin`, mounted on the Studio host. Full details
+are in that repo's README.
+
+Author endpoints: JWT or session login, plus `has_course_author_access` for the job's course.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/course-from-recording/jobs/` | Create a job with metadata; returns the job and a presigned upload URL. |
-| `GET /api/course-from-recording/jobs/?course_id=…` | Latest job for a course, used to resume. |
-| `GET /api/course-from-recording/jobs/<id>/` | Status, progress, error and result links (presigned download URLs). |
-| `POST /api/course-from-recording/jobs/<id>/start/` | Check the upload exists, then queue the job. |
-| `POST /api/course-from-recording/jobs/<id>/retry/` | Queue a failed job again; it continues from the failed step. |
-| `POST /api/course-from-recording/internal/jobs/<id>/status/` | **Service only.** Update status, progress, results or error. Requires the shared secret. |
-| *later* `GET/PUT …/jobs/<id>/draft/` | Read and save the reviewed outline and text. |
-| *later* `POST …/jobs/<id>/publish/` | Write the draft into the course, reusing `ai_course_creator/services/course_builder.py` (`apply_course_json`). |
+| `POST /api/course-from-recording/v1/jobs/` | Create a job (`course_id`, `filename`, `content_type`, `size`, `consent`, `details`); returns the job and a signed S3 upload link. Type and size are part of the signature. |
+| `GET /api/course-from-recording/v1/jobs/?course_id=…` | Latest job for a course, used to resume. |
+| `GET /api/course-from-recording/v1/jobs/<id>/` | Status, progress, error and short-lived download links to the outputs. |
+| `POST /api/course-from-recording/v1/jobs/<id>/start/` | Check the upload is in S3 with the declared size, then queue the job. |
+| `POST /api/course-from-recording/v1/jobs/<id>/retry/` | Queue a failed job again; it continues from the failed step. |
+| *later* `GET/PUT …/v1/jobs/<id>/draft/` | Read and save the reviewed outline and text. |
+| *later* `POST …/v1/jobs/<id>/publish/` | Write the draft into the course, reusing `ai_course_creator/services/course_builder.py` (`apply_course_json`). |
+
+Service endpoints: no user login; every request needs the shared secret in the `X-Service-Token` header.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /api/course-from-recording/v1/service/jobs/<id>/` | Job details, its S3 folder and the recording's key. The service reads these instead of trusting anything in the queue entry. |
+| `PATCH /api/course-from-recording/v1/service/jobs/<id>/` | Progress report: any of `status`, `progress`, `error`, `results` (merged), `duration_seconds`, `transcribed_minutes`. Only while the job is queued or running. |
 
 ## Audio service
 
@@ -124,9 +132,11 @@ src/studio_tool_service/
     course_from_recording/
         job.py                 step order; skips steps whose output is already in S3
         steps/                 clean, speakers, transcribe, correct (later: structure, write, cut)
-tutor_plugin/                  adds the container, its limits and settings to docker-compose
 Dockerfile
 ```
+
+The Tutor plugin that adds the container, its limits and its settings (`studio_tool_service.py`) lives
+in the Tutor plugins folder with the other WeBuddhist plugins, not in this repo.
 
 The step code is copied from the pipeline repo's scripts and turned into functions that take input and
 output paths, without the command-line and `output/` folder logic.
@@ -170,8 +180,8 @@ The bucket is private. The browser only gets presigned URLs, which expire.
 
 ## Secrets and settings
 
-All values are set in Tutor config on the server, never in git. The Tutor plugin in `tutor_plugin/`
-defines them; the full list and the setup steps are in `tutor_plugin/README.md`.
+All values are set in Tutor config on the server, never in git. The `studio_tool_service` Tutor plugin
+defines them; the full list and the setup steps are in [tutor-setup.md](tutor-setup.md).
 
 | Setting | Used by |
 |---|---|

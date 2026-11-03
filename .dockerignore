@@ -3,6 +3,5 @@
 .venv
 docs
 tests
-tutor_plugin
 **/__pycache__
 **/*.egg-info
