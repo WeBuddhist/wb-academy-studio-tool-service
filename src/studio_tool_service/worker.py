@@ -5,20 +5,26 @@ The sherab plugin adds jobs to the queue as "<tool>:<job id>", e.g. "course_from
 A job being worked on sits in a second list, so if the service stops halfway it is put back in the
 queue on the next start, and the tool continues from the last finished step.
 """
+
 import logging
 import signal
+import time
 from typing import Callable, Dict
 
 import redis
 
-from . import config
+from . import config, course_from_recording
+from .errors import TryLater
 
 log = logging.getLogger("studio_tool_service")
 
-# Tool name -> function that runs one job of that tool. Each tool registers itself here.
-TOOLS: Dict[str, Callable[[str, config.Settings], None]] = {}
+# Tool name -> function that runs one job of that tool.
+TOOLS: Dict[str, Callable[[str, config.Settings], None]] = {
+    "course_from_recording": course_from_recording.run,
+}
 
 WAIT_SECONDS = 5
+RETRY_LATER_SECONDS = 30  # pause after a job that has to wait (e.g. Studio restarting), before the next one
 
 
 def recover_unfinished(client, settings: config.Settings) -> None:
@@ -47,6 +53,14 @@ def process_next(client, settings: config.Settings) -> bool:
         return False
     try:
         run(item, settings)
+    except TryLater as reason:
+        # Back to the end of the queue (before it leaves the processing list, so it is never lost); the job
+        # continues from its last finished step when its turn comes again.
+        log.warning("Job %s has to wait (%s); trying again later", item, reason)
+        client.lpush(settings.queue, item)
+        client.lrem(settings.processing_queue, 1, item)
+        time.sleep(RETRY_LATER_SECONDS)
+        return True
     except Exception:  # noqa: BLE001 - one failed job must not stop the service
         log.exception("Job %s failed", item)
     client.lrem(settings.processing_queue, 1, item)

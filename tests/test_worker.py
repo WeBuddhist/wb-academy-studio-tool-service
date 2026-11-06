@@ -1,6 +1,7 @@
 import pytest
 
 from studio_tool_service import config, worker
+from studio_tool_service.errors import TryLater
 
 ENV = {
     "REDIS_URL": "redis://redis:6379/3",
@@ -39,6 +40,9 @@ class FakeRedis:
     def lrem(self, name, count, item):
         self.lists[name].remove(item)
 
+    def lpush(self, name, item):
+        self._push(name, "LEFT", item)
+
 
 @pytest.fixture
 def settings():
@@ -54,8 +58,12 @@ def tools(monkeypatch):
 
 def test_settings_are_read_from_the_environment(settings):
     assert settings.cms_url == "http://cms:8000"
-    assert settings.s3_prefix == "studio-tools"
     assert settings.processing_queue == "studio_tool_service:jobs:processing"
+
+
+def test_transcription_keys_are_optional():
+    settings = config.load({**ENV, "GEMINI_API_KEY": "key", "GEMINI_MODEL": "model"})
+    assert (settings.monlam_api_key, settings.gemini_api_key, settings.gemini_model) == ("", "key", "model")
 
 
 def test_missing_settings_stop_the_service():
@@ -101,3 +109,19 @@ def test_unknown_tools_are_skipped(settings, tools):
 
     assert worker.process_next(client, settings)
     assert tools == []
+
+
+def test_a_job_that_has_to_wait_goes_back_to_the_end_of_the_queue(settings, monkeypatch):
+    def studio_down(job_id, _):
+        raise TryLater("Studio is restarting")
+
+    monkeypatch.setattr(worker, "TOOLS", {"course_from_recording": studio_down})
+    monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
+    client = FakeRedis()
+    client.lists[settings.queue] = ["course_from_recording:newer", "course_from_recording:waiting"]
+
+    assert worker.process_next(client, settings)
+
+    # Not lost: back in the queue, behind the job that was already waiting.
+    assert client.lists[settings.queue] == ["course_from_recording:waiting", "course_from_recording:newer"]
+    assert client.lists[settings.processing_queue] == []

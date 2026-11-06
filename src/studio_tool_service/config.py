@@ -1,4 +1,5 @@
 """Settings for the service, read from environment variables that the Tutor plugin sets."""
+
 import os
 from dataclasses import dataclass
 from typing import Mapping
@@ -11,11 +12,15 @@ class Settings:
     redis_url: str
     queue: str
     s3_bucket: str
-    s3_prefix: str
     cms_url: str
     service_token: str
     monlam_api_key: str
+    monlam_base_url: str
+    # Reserved for English transcription (round 2, not built yet): read now so the deployment is ready.
+    gemini_api_key: str
+    gemini_model: str
     max_recording_minutes: float
+    cpu_threads: int
 
     @property
     def processing_queue(self) -> str:
@@ -31,10 +36,15 @@ def load(env: Mapping[str, str] = os.environ) -> Settings:
         redis_url=env["REDIS_URL"],
         queue=env["QUEUE_NAME"],
         s3_bucket=env["S3_BUCKET"],
-        s3_prefix=env.get("S3_PREFIX", "studio-tools").strip("/"),
         cms_url=env["CMS_URL"].rstrip("/"),
         service_token=env["SERVICE_TOKEN"],
-        # Only the transcription step needs it; that step fails with a clear message without it.
+        # Only the transcription step needs these (Monlam for Tibetan, Gemini for English); it fails
+        # with a clear message when the one it needs is missing.
         monlam_api_key=env.get("MONLAM_API_KEY", ""),
+        monlam_base_url=env.get("MONLAM_BASE_URL", "https://api-v1.monlamai.studio").rstrip("/"),
+        gemini_api_key=env.get("GEMINI_API_KEY", ""),
+        gemini_model=env.get("GEMINI_MODEL", ""),
         max_recording_minutes=float(env.get("MAX_RECORDING_MINUTES", "240")),
+        # The container's CPU limit: without it PyTorch starts a thread per core of the whole server.
+        cpu_threads=max(1, int(float(env.get("CPU_THREADS", "2")))),
     )

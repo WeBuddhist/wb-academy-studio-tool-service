@@ -11,9 +11,16 @@ authors = [
 description = "Background service for WeBuddhist Studio tools: turns teaching recordings into course drafts (audio cleaning, speaker detection, Monlam transcription, S3 storage)."
 readme = "README.md"
 requires-python = ">=3.8"
-# Only what the code imports so far; the full pinned list for the image is in requirements.txt.
+# What the code needs, unpinned; the image installs the pinned versions in requirements.txt, plus
+# torch, torchaudio and speechbrain (only the voices step imports them, and only when it runs).
 dependencies = [
+    "boto3",
+    "numpy",
     "redis>=5",
+    "requests",
+    "scikit-learn",
+    "scipy",
+    "soundfile",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
