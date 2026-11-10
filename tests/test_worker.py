@@ -62,8 +62,10 @@ def test_settings_are_read_from_the_environment(settings):
 
 
 def test_transcription_keys_are_optional():
-    settings = config.load({**ENV, "GEMINI_API_KEY": "key", "GEMINI_MODEL": "model"})
-    assert (settings.monlam_api_key, settings.gemini_api_key, settings.gemini_model) == ("", "key", "model")
+    settings = config.load({**ENV, "OPENROUTER_API_KEY": "key", "OPENROUTER_MODEL": "google/model"})
+    assert (settings.monlam_api_key, settings.openrouter_api_key, settings.openrouter_model) == (
+        "", "key", "google/model"
+    )
 
 
 def test_missing_settings_stop_the_service():

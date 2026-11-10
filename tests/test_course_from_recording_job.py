@@ -5,9 +5,10 @@ import pytest
 
 from studio_tool_service import audio, config
 from studio_tool_service.course_from_recording import job as job_module
-from studio_tool_service.course_from_recording import clean, voices
+from studio_tool_service.course_from_recording import clean, suggest, voices
 from studio_tool_service.course_from_recording.monlam import MonlamRefused
 from studio_tool_service.course_from_recording.studio import JobStopped, StudioUnavailable
+from studio_tool_service.llm import LLMError, LLMRefused
 
 FOLDER = "studio-tools/course-from-recording/Sherab-tspc12-2026/2026-11-03_day-1_a101e248"
 ENV = {
@@ -43,6 +44,14 @@ class FakeStudio:
 
     def statuses(self):
         return [r["status"] for r in self.reports if "status" in r]
+
+    written = None  # what write_course was asked to write
+
+    def write_course(self, job_id, lessons):
+        if self.stopped:
+            raise JobStopped(job_id, self.stopped)
+        self.written = lessons
+        return {"status": "course_ready", "sections": ["block-v1:section-1"]}
 
 
 class FakeStorage:
@@ -387,3 +396,198 @@ def _every_report(init):
         init(self, *args, **{**kwargs, "every_seconds": 0})
 
     return no_throttle
+
+
+# ---------- phase 2: the course ----------
+
+TRANSCRIPT = [
+    {"start": 0.0, "end": 15.0, "speaker": "teacher", "text": "ཀ།", "warnings": []},
+    {"start": 15.0, "end": 30.0, "speaker": "teacher", "text": "ཁ།", "warnings": []},
+    {"start": 30.0, "end": 40.0, "speaker": "no speech", "text": None, "warnings": []},
+    {"start": 40.0, "end": 70.0, "speaker": "translator", "text": None, "warnings": []},
+    {"start": 70.0, "end": 80.0, "speaker": "teacher", "text": "ག།", "warnings": []},
+]
+TRANSCRIBED = {"transcript": "3-transcript/transcript.txt", "transcript_json": "3-transcript/transcript.json"}
+
+
+class FakeLLM:
+    refuse = None  # an error to raise instead of answering
+    calls = 0
+
+    def __init__(self, api_key, model):
+        self.tokens_in = self.tokens_out = 0
+
+    def json(self, prompt, schema, system=""):
+        FakeLLM.calls += 1
+        if FakeLLM.refuse:
+            raise FakeLLM.refuse
+        if schema is suggest.OUTLINE_SCHEMA:
+            return {"course_title": "སྤྱོད་འཇུག", "sections": [{"title": "ལེའུ།", "lessons": [
+                {"title": "ཀ", "first_line": 0, "last_line": 0},
+                {"title": "ཁ", "first_line": 1, "last_line": 4},
+            ]}]}
+        return {"summary": "བསྡུས།", "key_points": ["ཀ"], "mcq": [], "reflection": ["བསམ།"]}
+
+
+def a_draft():
+    def lesson(lesson_id, first, last, start, end, include=True):
+        return {"id": lesson_id, "title": "ཀ", "include": include, "first_line": first, "last_line": last,
+                "start": start, "end": end, "minutes": round((end - start) / 60, 1), "summary": "",
+                "key_points": [], "mcq": [], "reflection": []}
+
+    return {"version": 1, "course_title": "", "sections": [
+        {"id": "s1", "title": "ལེའུ།", "lessons": [
+            lesson("s1-l1", 0, 0, 0.0, 15.0), lesson("s1-l2", 1, 3, 15.0, 70.0),
+        ]},
+        {"id": "s2", "title": "ལེའུ།", "lessons": [lesson("s2-l1", 4, 4, 70.0, 80.0, include=False)]},
+    ]}
+
+
+def transcribed_storage(**files):
+    return FakeStorage({f"{FOLDER}/3-transcript/transcript.json": TRANSCRIPT, f"{FOLDER}/2-clean/clean.flac": b"x",
+                        **files})
+
+
+@pytest.fixture
+def course_fakes(fakes, monkeypatch):
+    monkeypatch.setattr(job_module, "LLM", FakeLLM)
+    FakeLLM.refuse, FakeLLM.calls = None, 0
+    cut = []
+
+    def mp3(sound, rate, dest):
+        dest.write_bytes(b"mp3")
+        cut.append(dest.name)
+        return dest
+
+    monkeypatch.setattr(job_module.lessons, "write_mp3", mp3)
+
+    def run(job, storage=None, env=None, studio=None):
+        return fakes(job, storage, {"OPENROUTER_API_KEY": "openrouter-key", **(env or {})}, studio)
+
+    run.cut = cut
+    return run
+
+
+def test_once_the_transcript_is_checked_a_course_is_suggested(course_fakes):
+    # Writing the course needs no Monlam: only the AI model.
+    studio, storage = course_fakes(a_job(results=TRANSCRIBED), transcribed_storage(), env={"MONLAM_API_KEY": ""})
+
+    assert studio.statuses() == ["suggesting", "course_draft_ready"]
+    final = studio.reports[-1]
+    assert final["progress"] == 100 and final["results"] == {"course_suggestion": "4-course/suggestion.json"}
+    draft = final["course_draft"]
+    assert [lesson["id"] for lesson in draft["sections"][0]["lessons"]] == ["s1-l1", "s1-l2"]
+    assert draft["sections"][0]["lessons"][1]["reflection"] == ["བསམ།"]
+    assert storage.files[f"{FOLDER}/4-course/suggestion.json"] == draft
+    assert FakeLLM.calls == 3  # the outline, then each lesson
+
+
+def test_suggesting_needs_an_openrouter_key(course_fakes):
+    studio, _ = course_fakes(a_job(results=TRANSCRIBED), transcribed_storage(), env={"OPENROUTER_API_KEY": ""})
+    assert studio.statuses() == ["failed"]
+    assert studio.reports[-1]["error"] == "Writing the course isn't set up on this server yet (no OpenRouter key)."
+
+
+def test_a_refused_key_or_no_credit_is_explained(course_fakes):
+    FakeLLM.refuse = LLMRefused(401, "No auth credentials found")
+    studio, _ = course_fakes(a_job(results=TRANSCRIBED), transcribed_storage())
+    assert studio.reports[-1]["error"].startswith("OpenRouter refused this server's key")
+
+    FakeLLM.refuse = LLMRefused(402, "Insufficient credits")
+    studio, _ = course_fakes(a_job(results=TRANSCRIBED), transcribed_storage())
+    assert studio.reports[-1]["error"] == (
+        "The OpenRouter account has run out of credit. Once it is topped up, try again."
+    )
+
+
+def test_the_model_not_answering_asks_the_author_to_try_again(course_fakes):
+    FakeLLM.refuse = LLMError("OpenRouter did not answer after 5 tries")
+    studio, _ = course_fakes(a_job(results=TRANSCRIBED), transcribed_storage())
+    assert studio.statuses()[-1] == "failed"
+    assert "Try again in a few minutes" in studio.reports[-1]["error"]
+
+
+def test_the_approved_draft_is_cut_into_lessons_and_studio_writes_the_course(course_fakes):
+    job = a_job(results=TRANSCRIBED, course_draft=a_draft(), course_approved=True)
+
+    studio, storage = course_fakes(job, transcribed_storage())
+
+    assert studio.statuses() == ["cutting_audio", "writing_course"]
+    # The lesson switched off isn't cut; the second lesson has the translator's reply too.
+    assert studio.written == {
+        "s1-l1": {"tracks": {"bo": "5-lessons/lesson-1-1_bo.mp3"}},
+        "s1-l2": {"tracks": {"bo": "5-lessons/lesson-1-2_bo.mp3", "translator": "5-lessons/lesson-1-2_translator.mp3"}},
+    }
+    for path in ("lesson-1-1_bo.mp3", "lesson-1-2_bo.mp3", "lesson-1-2_translator.mp3"):
+        assert storage.files[f"{FOLDER}/5-lessons/{path}"] == b"mp3"
+    index = storage.files[f"{FOLDER}/5-lessons/lessons.json"]
+    assert index["s1-l2"]["number"] == "1-2" and index["s1-l2"]["pieces"]["translator"][0][2] == "translator"
+    assert FakeLLM.calls == 0
+
+
+def test_cutting_continues_with_the_lessons_not_cut_yet(course_fakes):
+    done = {"s1-l1": {"number": "1-1", "tracks": {"bo": "5-lessons/lesson-1-1_bo.mp3"}, "minutes": {}, "pieces": {}}}
+    storage = transcribed_storage(**{f"{FOLDER}/5-lessons/lessons.json": done,
+                                     f"{FOLDER}/5-lessons/lesson-1-1_bo.mp3": b"mp3"})
+
+    studio, _ = course_fakes(a_job(results=TRANSCRIBED, course_draft=a_draft(), course_approved=True), storage)
+
+    assert sorted(course_fakes.cut) == ["lesson-1-2_bo.mp3", "lesson-1-2_translator.mp3"]
+    assert set(studio.written) == {"s1-l1", "s1-l2"}
+
+
+def test_without_the_cleaned_recording_the_author_is_told(course_fakes):
+    storage = FakeStorage({f"{FOLDER}/3-transcript/transcript.json": TRANSCRIPT})
+    studio, _ = course_fakes(a_job(results=TRANSCRIBED, course_draft=a_draft(), course_approved=True), storage)
+    assert studio.reports[-1]["error"].startswith("The cleaned recording is missing")
+
+
+def test_starting_over_while_suggesting_removes_what_it_wrote(course_fakes, monkeypatch):
+    studio = FakeStudio(a_job(results=TRANSCRIBED))
+    # The author starts over just as the outline is done.
+    studio.stop_when = lambda fields: (
+        "cancelled" if fields.get("progress", 0) >= 30 and "status" not in fields else None
+    )
+
+    _, storage = course_fakes(studio.data, transcribed_storage(), studio=studio)
+
+    assert not [key for key in storage.files if "/4-course/" in key]
+    assert FakeLLM.calls == 1
+
+
+def test_a_job_waiting_for_the_author_to_shape_the_course_is_left_alone(course_fakes):
+    studio, _ = course_fakes(a_job(status="course_draft_ready", results=TRANSCRIBED, course_draft=a_draft()))
+    assert studio.reports == [] and FakeLLM.calls == 0
+
+
+def test_when_every_lesson_is_cut_it_goes_straight_to_writing(course_fakes):
+    tracks = {"s1-l1": {"bo": "5-lessons/lesson-1-1_bo.mp3"}, "s1-l2": {"bo": "5-lessons/lesson-1-2_bo.mp3"}}
+    done = {lesson: {"number": "", "tracks": paths, "minutes": {}, "pieces": {}} for lesson, paths in tracks.items()}
+    files = {f"{FOLDER}/{path}": b"mp3" for paths in tracks.values() for path in paths.values()}
+    storage = transcribed_storage(**{f"{FOLDER}/5-lessons/lessons.json": done}, **files)
+
+    # E.g. a run after Studio said it was still writing the course.
+    studio, _ = course_fakes(a_job(results=TRANSCRIBED, course_draft=a_draft(), course_approved=True,
+                                   status="writing_course"), storage)
+
+    assert studio.statuses() == ["writing_course"]  # not back to cutting
+    assert course_fakes.cut == []
+    assert set(studio.written) == {"s1-l1", "s1-l2"}
+
+
+def test_a_lesson_with_no_sound_of_the_teacher_is_named(course_fakes, monkeypatch):
+    real = job_module.lessons.cut_lesson
+
+    def nothing_for_the_first(clean, speech, rate, turns, start, end):
+        return {} if start == 0.0 else real(clean, speech, rate, turns, start, end)
+
+    monkeypatch.setattr(job_module.lessons, "cut_lesson", nothing_for_the_first)
+    draft = a_draft()
+    draft["sections"][0]["lessons"][0]["title"] = "སྐྱབས་འགྲོ།"
+
+    studio, _ = course_fakes(a_job(results=TRANSCRIBED, course_draft=draft, course_approved=True),
+                             transcribed_storage())
+
+    assert studio.statuses()[-1] == "failed"
+    assert "“སྐྱབས་འགྲོ།”" in studio.reports[-1]["error"]
+    assert studio.written is None  # Studio wasn't asked to write a course missing a lesson's audio

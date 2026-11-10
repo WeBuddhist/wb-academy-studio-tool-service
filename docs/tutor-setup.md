@@ -28,8 +28,8 @@ There are two ways to set it up:
    tutor plugins enable studio_tool_service
    ```
 
-2. Tell Tutor where the repo is, and set the Monlam key (for Tibetan; English uses the Gemini key
-   Tutor already has for the AI course creator):
+2. Tell Tutor where the repo is, and set the Monlam key (for Tibetan transcription). Writing the course
+   uses the OpenRouter key Tutor already has for the AI course creator (`OPENROUTER_API_KEY`):
 
    ```bash
    tutor config save \
@@ -120,10 +120,12 @@ building happens on the server.
 | `STUDIO_TOOL_SERVICE_DOCKER_IMAGE` | `studio-tool-service:0.0.1`; the image the container runs |
 | `STUDIO_TOOL_SERVICE_BUCKET` | `S3_STORAGE_BUCKET` (the private Open edX bucket) |
 | `STUDIO_TOOL_SERVICE_PREFIX` | `studio-tools` |
+| `STUDIO_TOOL_SERVICE_PUBLIC_BUCKET` | `S3_PARTNER_LOGO_BUCKET` (`sherab-public-assets-dev` / `sherab-public-assets`); where Studio copies the finished course's lesson audio |
+| `STUDIO_TOOL_SERVICE_PUBLIC_DOMAIN` | `S3_PARTNER_LOGO_CUSTOM_DOMAIN`; the address the course's players load that audio from |
 | `STUDIO_TOOL_SERVICE_AWS_REGION` | `S3_REGION` |
 | `STUDIO_TOOL_SERVICE_AWS_ACCESS_KEY_ID` / `..._SECRET_ACCESS_KEY` | the Open edX key |
 | `STUDIO_TOOL_SERVICE_MONLAM_API_KEY` | empty; needed for Tibetan |
-| `STUDIO_TOOL_SERVICE_GEMINI_API_KEY` / `..._GEMINI_MODEL` | Tutor's `GEMINI_API_KEY` / `GEMINI_MODEL` (the AI course creator's); needed for English |
+| `STUDIO_TOOL_SERVICE_OPENROUTER_API_KEY` / `..._OPENROUTER_MODEL` | Tutor's `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` (the AI course creator's; model `google/gemini-2.5-flash-lite` if unset); needed to suggest a course |
 | `STUDIO_TOOL_SERVICE_REDIS_DB` | `3` (Open edX uses 0 and 1) |
 | `STUDIO_TOOL_SERVICE_QUEUE` | `studio_tool_service:jobs` |
 | `STUDIO_TOOL_SERVICE_CMS_URL` | `http://cms:8000` |

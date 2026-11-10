@@ -1,13 +1,19 @@
 """
-Runs one recording through the "course from a recording" steps (phase 1: up to the transcript).
+Runs one recording through the "course from a recording" steps.
 
-    More than one speaker: find the voices -> pause for the author's tags -> clean -> transcribe the teacher
-    One speaker:           clean -> transcribe
+    Phase 1, up to the transcript:
+        More than one speaker: find the voices -> pause for the author's tags -> clean -> transcribe the teacher
+        One speaker:           clean -> transcribe
+    Phase 2, the course (each run starts from the author's click in Studio):
+        suggest a course (the AI model, through OpenRouter) -> pause while the author shapes it
+        cut the lesson audio -> Studio writes the course
 
-Every step's result goes to S3 under the job's folder (chosen by Studio), and a step whose result is
-already there is skipped, so a retried or restarted job continues where it stopped. Progress goes to
-Studio after each step and every few seconds within one. If the author starts over, Studio refuses the
-next report: the run stops there and deletes what it wrote since Studio deleted the job's files.
+What a run does follows from what is already done: an approved draft -> cut the audio and write the course;
+a transcript -> suggest the course; otherwise phase 1. Every step's result goes to S3 under the job's folder
+(chosen by Studio), and a step whose result is already there is skipped, so a retried or restarted job
+continues where it stopped. Progress goes to Studio after each step and every few seconds within one. If
+the author starts over, Studio refuses the next report: the run stops there and deletes what it wrote since
+Studio deleted the job's files.
 """
 
 import datetime
@@ -17,10 +23,12 @@ import tempfile
 from pathlib import Path
 
 from .. import audio
+from ..llm import LLM, LLMError, LLMRefused
 from ..storage import Storage
-from . import clean, pieces, transcript, voices
+from . import clean, lessons, pieces, transcript, voices
 from .monlam import Monlam, MonlamRefused, Transcriber
 from .studio import JobGone, JobStopped, Progress, Studio, StudioUnavailable
+from .suggest import SUGGESTION, NoTeacherText, OutlineProblem, Suggester
 
 log = logging.getLogger(__name__)
 
@@ -46,10 +54,14 @@ RAW_TXT = "3-transcript/transcript-raw.txt"
 RAW_JSON = "3-transcript/transcript-raw.json"
 PLAN = "3-transcript/working/plan.json"
 REPLIES = "3-transcript/working/results"
+LESSON_CLIP = "5-lessons/lesson-{number}_{track}.mp3"
+LESSONS_INDEX = "5-lessons/lessons.json"
 
-RUNNABLE = ("queued", "finding_speakers", "cleaning", "transcribing")
+RUNNABLE = ("queued", "finding_speakers", "cleaning", "transcribing", "suggesting", "cutting_audio", "writing_course")
+CUT_SHARE = 0.95  # of the cutting step's progress; telling Studio to write the course is the rest
 
 GENERIC_ERROR = "Something went wrong while processing the recording. Try again; if it stops again, ask for help."
+MISSING_TRANSCRIPT = "The transcript is missing. Start over to transcribe the recording again."
 
 
 class StepFailed(Exception):
@@ -65,6 +77,26 @@ def refusal_message(status: int) -> str:
     return (
         f"Monlam refused part of the recording (error {status}). Try again; if it happens again, ask for help. "
         "The parts already done won't be sent (or paid for) again."
+    )
+
+
+def llm_message(error: LLMError) -> str:
+    """Why the AI model couldn't write the course, in words for the author."""
+    if isinstance(error, LLMRefused):
+        if error.status in (401, 403):
+            return (
+                "OpenRouter refused this server's key. Ask an administrator to check the OpenRouter key, "
+                "then try again."
+            )
+        if error.status == 402:
+            return "The OpenRouter account has run out of credit. Once it is topped up, try again."
+        return (
+            f"The AI model refused to write the course (error {error.status}). Try again; if it happens again, "
+            "ask for help."
+        )
+    return (
+        "The AI model could not write the course just now. Try again in a few minutes; the parts already written "
+        "are kept."
     )
 
 
@@ -135,7 +167,22 @@ class RecordingJob:
         if not self.settings.monlam_api_key:
             raise StepFailed("Tibetan transcription isn't set up on this server yet (no Monlam key).")
 
+    def phase(self) -> str:
+        """What this run is for, from what is already done."""
+        if self.job.get("course_approved") and self.job.get("course_draft"):
+            return "build"
+        if (self.job.get("results") or {}).get("transcript_json"):
+            return "suggest"
+        return "transcribe"
+
     def run(self) -> None:
+        phase = self.phase()
+        if phase == "suggest":
+            self.suggest()
+            return
+        if phase == "build":
+            self.build()
+            return
         self.check_can_finish()
         # Say straight away which step this run is on: downloading a long recording takes a while,
         # and the author should see it move, not "waiting for its turn".
@@ -315,3 +362,115 @@ class RecordingJob:
             progress=100,
             results={"transcript": TRANSCRIPT_TXT, "transcript_json": TRANSCRIPT_JSON, "transcript_raw": RAW_TXT},
         )
+
+    # ---------- phase 2, step 1: suggest a course ----------
+
+    def suggest(self) -> None:
+        if not self.settings.openrouter_api_key:
+            raise StepFailed("Writing the course isn't set up on this server yet (no OpenRouter key).")
+        self.status = "suggesting"
+        self.report(status="suggesting", progress=0)
+        lines = self.storage.read_json(self.key(TRANSCRIPT_JSON))
+        if lines is None:
+            raise StepFailed(MISSING_TRANSCRIPT)
+        suggester = Suggester(
+            LLM(self.settings.openrouter_api_key, self.settings.openrouter_model), self.storage, self.key, self.details
+        )
+        try:
+            draft = suggester.run(lines, self.job.get("transcript_edits") or {}, Progress(self.studio, self.id))
+        except NoTeacherText:
+            raise StepFailed("The transcript has none of the teacher's words to make a course from.")
+        except OutlineProblem as problem:
+            log.warning("Job %s: the model's outline didn't fit the transcript: %s", self.id, problem.args[0])
+            raise StepFailed(
+                "The suggested outline of the course didn't fit the transcript, even when asked again. Try again."
+            )
+        except LLMError as error:
+            log.warning("Job %s: %s", self.id, error)
+            raise StepFailed(llm_message(error)) from error
+        self.report(status="course_draft_ready", progress=100, course_draft=draft,
+                    results={"course_suggestion": SUGGESTION})
+
+    # ---------- phase 2, step 2: cut the lesson audio, then Studio writes the course ----------
+
+    def build(self) -> None:
+        # Each lesson's clips are named by its place in the draft ("1-2": section 1, lesson 2).
+        kept = [
+            (f"{s_number}-{l_number}", lesson)
+            for s_number, section in enumerate(self.job["course_draft"]["sections"], start=1)
+            for l_number, lesson in enumerate(section["lessons"], start=1)
+            if lesson.get("include", True)
+        ]
+        if not kept:
+            raise StepFailed("No lessons were kept, so there is nothing to add to the course.")
+
+        # Lessons already cut (lessons.json, written after each one) are kept, so a retry continues. One without
+        # its Tibetan track is cut again (an earlier version left out short bits of the teacher).
+        done = self.storage.read_json(self.key(LESSONS_INDEX)) or {}
+        todo = [
+            (number, lesson)
+            for number, lesson in kept
+            if lesson["id"] not in done
+            or not done[lesson["id"]]["tracks"].get("bo")
+            or not all(self.storage.exists(self.key(path)) for path in done[lesson["id"]]["tracks"].values())
+        ]
+        # Nothing left to cut (e.g. this run comes after Studio said it was still writing the course): straight
+        # on to writing, so the author doesn't see the step go back to cutting.
+        if todo:
+            self.status = "cutting_audio"
+            self.report(status="cutting_audio", progress=0)
+            lines = self.storage.read_json(self.key(TRANSCRIPT_JSON))
+            if lines is None:
+                raise StepFailed(MISSING_TRANSCRIPT)
+            self.cut_lessons(todo, lines, done)
+
+        # Studio needs every lesson's Tibetan track. Cutting keeps even short bits of the teacher, so only a
+        # lesson with no sound of the teacher at all lacks one.
+        silent = [lesson["title"] for _, lesson in kept if not done[lesson["id"]]["tracks"].get("bo")]
+        if silent:
+            raise StepFailed(
+                f"There is no Tibetan audio to cut for the lesson “{silent[0]}”. Start over, and check the voices "
+                "are tagged right."
+            )
+
+        self.status = "writing_course"
+        self.report(status="writing_course", progress=int(CUT_SHARE * 100), results={"lessons": LESSONS_INDEX})
+        answer = self.studio.write_course(
+            self.id, {lesson["id"]: {"tracks": done[lesson["id"]]["tracks"]} for _, lesson in kept}
+        )
+        # Studio sets the job's status itself: course_ready, or failed with a message for the author.
+        log.info("Job %s: Studio wrote the course: %s", self.id, answer.get("status"))
+
+    def cut_lessons(self, todo: list, lines: list, done: dict) -> None:
+        # Before the long download of the original.
+        if not self.storage.exists(self.key(CLEANED)):
+            raise StepFailed("The cleaned recording is missing. Start over to process the recording again.")
+        preparing = Progress(self.studio, self.id, end=PREPARE_SHARE * 0.8)
+        original = self.storage.download(
+            self.job["original_key"], self.tmp / f"original{Path(self.job['original_key']).suffix}", preparing
+        )
+        speech = audio.to_wav(original, self.tmp / "work-16k.wav", pieces.SR)
+        original.unlink()
+        cleaned = self.storage.download(self.key(CLEANED), self.tmp / "clean.flac")
+        progress = Progress(self.studio, self.id, start=PREPARE_SHARE, end=CUT_SHARE)
+        progress(0)
+
+        turns = lessons.turns_from_lines(lines)
+        for count, (number, lesson) in enumerate(todo, start=1):
+            tracks = lessons.cut_lesson(cleaned, speech, clean.SR, turns, lesson["start"], lesson["end"])
+            entry = {"number": number, "tracks": {}, "minutes": {}, "pieces": {}}
+            for track, cut in tracks.items():
+                path = LESSON_CLIP.format(number=number, track=track)
+                mp3 = lessons.write_mp3(cut["sound"], clean.SR, self.tmp / f"lesson-{number}_{track}.mp3")
+                self.storage.upload(mp3, self.key(path), "audio/mpeg")
+                mp3.unlink()
+                entry["tracks"][track] = path
+                entry["minutes"][track] = round(len(cut["sound"]) / clean.SR / 60, 1)
+                # Where each piece comes from in the recording, to check a lesson by ear.
+                entry["pieces"][track] = [
+                    [round(piece["start"], 2), round(piece["end"], 2), piece["voices"]] for piece in cut["pieces"]
+                ]
+            done[lesson["id"]] = entry
+            self.storage.write_json(self.key(LESSONS_INDEX), done)
+            progress(count / len(todo))
+        log.info("Job %s: cut the audio of %s lessons", self.id, len(todo))

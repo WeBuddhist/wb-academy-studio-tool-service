@@ -33,6 +33,7 @@ class StudioUnavailable(TryLater):
 # Answers worth trying again: Studio busy or restarting. Anything else (e.g. 400) is a bug and is raised.
 TRANSIENT = {429, 500, 502, 503, 504}
 RETRY_DELAYS = (2, 5, 10)  # seconds between tries
+WRITE_TIMEOUT = 600  # writing a long course into Studio (copying the audio, creating the pages)
 
 
 class Studio:
@@ -41,12 +42,14 @@ class Studio:
         self.session = session or requests.Session()
         self.session.headers["X-Service-Token"] = token
 
-    def send(self, method: str, job_id: str, attempts: int, **kwargs) -> requests.Response:
+    def send(
+        self, method: str, job_id: str, attempts: int, path: str = "", timeout: float = 30, **kwargs
+    ) -> requests.Response:
         """One request, tried again after a short wait while Studio is unreachable or busy."""
-        url = f"{self.base}/{job_id}/"
+        url = f"{self.base}/{job_id}/{path}"
         for attempt in range(attempts):
             try:
-                resp = self.session.request(method, url, timeout=30, **kwargs)
+                resp = self.session.request(method, url, timeout=timeout, **kwargs)
             except (requests.ConnectionError, requests.Timeout) as error:
                 problem = str(error)
             else:
@@ -70,6 +73,22 @@ class Studio:
         running) stops the job; Studio being unreachable raises StudioUnavailable, so the job runs again later.
         """
         resp = self.send("PATCH", job_id, attempts=attempts, json=fields)
+        self._check(job_id, resp)
+
+    def write_course(self, job_id: str, lessons: dict) -> dict:
+        """
+        The lesson clips are cut (``lessons``: lesson id -> {"tracks": {track: path in the job folder}}): Studio
+        copies them to the public bucket and writes the course. Writing takes a while, hence the long wait;
+        asking again is safe, since Studio answers a course already written as it is. Returns Studio's answer,
+        {"status": "course_ready" | "failed", ...}.
+        """
+        resp = self.send("POST", job_id, attempts=len(RETRY_DELAYS) + 1, path="course/", timeout=WRITE_TIMEOUT,
+                         json={"lessons": lessons})
+        self._check(job_id, resp)
+        return resp.json()
+
+    @staticmethod
+    def _check(job_id: str, resp: requests.Response) -> None:
         if resp.status_code == 404:
             raise JobGone(job_id)
         if resp.status_code == 409:
