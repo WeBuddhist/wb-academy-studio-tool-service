@@ -11,6 +11,17 @@ authors = [
 description = "Background service for WeBuddhist Studio tools: turns teaching recordings into course drafts (audio cleaning, speaker detection, Monlam transcription, S3 storage)."
 readme = "README.md"
 requires-python = ">=3.8"
+# What the code needs, unpinned; the image installs the pinned versions in requirements.txt, plus
+# torch, torchaudio and speechbrain (only the voices step imports them, and only when it runs).
+dependencies = [
+    "boto3",
+    "numpy",
+    "redis>=5",
+    "requests",
+    "scikit-learn",
+    "scipy",
+    "soundfile",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -26,5 +37,5 @@ dev = [
 
 
 [project.urls]
-"Homepage" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service-"
-"Bug Tracker" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service-/issues"
+"Homepage" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service"
+"Bug Tracker" = "https://github.com/Webuddhist-tech/wb-academy-studio-tool-service/issues"
